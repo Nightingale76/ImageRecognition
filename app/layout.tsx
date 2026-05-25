@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "图片识别助手",
+  title: "ai图片识别工具",
   description: "上传图片，使用 AI 识别图片内容",
 };
 

@@ -1,29 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const BAIDU_API_KEY = process.env.BAIDU_API_KEY || "";
-const BAIDU_SECRET_KEY = process.env.BAIDU_SECRET_KEY || "";
-
-interface BaiduTokenResponse {
-  access_token?: string;
-  expires_in?: number;
-  error?: string;
-  error_description?: string;
-}
-
-interface BaiduAdvancedGeneralItem {
-  keyword?: string;
-  name?: string;
-  root?: string;
-  score?: number;
-}
-
-interface BaiduAdvancedGeneralResponse {
-  result?: BaiduAdvancedGeneralItem[];
-  result_num?: number;
-  error_code?: number;
-  error_msg?: string;
-  log_id?: number;
-}
+const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY || "";
+const QWEN_MODEL = process.env.QWEN_MODEL || "qwen3.6-plus";
+const QWEN_BASE_URL =
+  process.env.QWEN_BASE_URL ||
+  "https://dashscope.aliyuncs.com/compatible-mode/v1";
 
 interface RecognitionResult {
   name: string;
@@ -31,78 +12,96 @@ interface RecognitionResult {
   category?: string;
 }
 
-async function getBaiduToken(): Promise<string> {
-  const tokenUrl = new URL("https://aip.baidubce.com/oauth/2.0/token");
-  tokenUrl.searchParams.set("grant_type", "client_credentials");
-  tokenUrl.searchParams.set("client_id", BAIDU_API_KEY);
-  tokenUrl.searchParams.set("client_secret", BAIDU_SECRET_KEY);
-
-  const response = await fetch(tokenUrl, { method: "POST" });
-  const data = (await response.json()) as BaiduTokenResponse;
-
-  if (!response.ok || data.error || !data.access_token) {
-    throw new Error(data.error_description || data.error || "获取百度访问令牌失败");
-  }
-
-  return data.access_token;
+interface QwenRecognitionContent {
+  description?: string;
+  results?: RecognitionResult[];
 }
 
-async function recognizeImage(
-  imageBase64: string,
-  token: string
-): Promise<BaiduAdvancedGeneralResponse> {
-  const recognizeUrl = new URL(
-    "https://aip.baidubce.com/rest/2.0/image-classify/v2/advanced_general"
-  );
-  recognizeUrl.searchParams.set("access_token", token);
+interface QwenChatResponse {
+  choices?: Array<{
+    message?: {
+      content?: string;
+    };
+  }>;
+  error?: {
+    message?: string;
+    code?: string;
+  };
+}
 
-  const response = await fetch(recognizeUrl, {
+function getImageUrl(image: string) {
+  if (image.startsWith("data:image/")) {
+    return image;
+  }
+
+  return `data:image/jpeg;base64,${image}`;
+}
+
+function stripMarkdownFence(content: string) {
+  return content
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+}
+
+function parseRecognitionContent(content: string): QwenRecognitionContent {
+  try {
+    return JSON.parse(stripMarkdownFence(content)) as QwenRecognitionContent;
+  } catch {
+    return {
+      description: content.trim(),
+      results: [],
+    };
+  }
+}
+
+async function recognizeImage(image: string): Promise<QwenRecognitionContent> {
+  const response = await fetch(`${QWEN_BASE_URL}/chat/completions`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
+      Authorization: `Bearer ${DASHSCOPE_API_KEY}`,
+      "Content-Type": "application/json",
     },
-    body: new URLSearchParams({
-      image: imageBase64,
+    body: JSON.stringify({
+      model: QWEN_MODEL,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image_url",
+              image_url: {
+                url: getImageUrl(image),
+              },
+            },
+            {
+              type: "text",
+              text:
+                "请识别这张图片，并只返回 JSON，不要返回 Markdown。格式为：" +
+                '{"description":"用中文自然描述图片内容","results":[{"name":"识别到的主体或元素","confidence":"高/中/低","category":"可选分类"}]}',
+            },
+          ],
+        },
+      ],
     }),
   });
 
-  const data = (await response.json()) as BaiduAdvancedGeneralResponse;
+  const data = (await response.json()) as QwenChatResponse;
 
-  if (!response.ok) {
-    throw new Error(data.error_msg || `百度识别接口请求失败：${response.status}`);
+  if (!response.ok || data.error) {
+    throw new Error(
+      data.error?.message || `Qwen 识别接口请求失败：${response.status}`
+    );
   }
 
-  return data;
-}
+  const content = data.choices?.[0]?.message?.content;
 
-function formatResults(items: BaiduAdvancedGeneralItem[] = []): RecognitionResult[] {
-  return items
-    .map((item) => ({
-      name: item.keyword || item.name || "未知内容",
-      confidence:
-        typeof item.score === "number"
-          ? `${(item.score * 100).toFixed(2)}%`
-          : "未知",
-      category: item.root,
-    }))
-    .filter((item) => item.name !== "未知内容");
-}
-
-function buildDescription(results: RecognitionResult[]): string {
-  if (results.length === 0) {
-    return "暂未识别出明确的图片内容。";
+  if (!content) {
+    throw new Error("Qwen 未返回有效识别结果");
   }
 
-  const names = results.slice(0, 5).map((item) => item.name);
-
-  if (names.length === 1) {
-    return `图片中可能包含：${names[0]}。`;
-  }
-
-  const lastName = names[names.length - 1];
-  const leadingNames = names.slice(0, -1).join("、");
-
-  return `图片中可能包含：${leadingNames}，以及${lastName}。`;
+  return parseRecognitionContent(content);
 }
 
 export async function POST(request: NextRequest) {
@@ -113,36 +112,23 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "请先上传图片" }, { status: 400 });
     }
 
-    if (!BAIDU_API_KEY || !BAIDU_SECRET_KEY) {
+    if (!DASHSCOPE_API_KEY) {
       return NextResponse.json(
-        { error: "百度 API 密钥未配置，请检查 .env.local" },
+        { error: "DashScope API Key 未配置，请检查 .env.local" },
         { status: 500 }
       );
     }
 
-    const token = await getBaiduToken();
-    const base64Data = image.includes(",") ? image.split(",")[1] : image;
-    const baiduResult = await recognizeImage(base64Data, token);
-
-    if (baiduResult.error_code) {
-      return NextResponse.json(
-        {
-          error: baiduResult.error_msg || "图片识别失败",
-          errorCode: baiduResult.error_code,
-        },
-        { status: 400 }
-      );
-    }
-
-    const results = formatResults(baiduResult.result);
+    const qwenResult = await recognizeImage(image);
 
     return NextResponse.json({
       success: true,
-      description: buildDescription(results),
-      results,
+      description: qwenResult.description || "暂未识别出明确的图片内容。",
+      results: qwenResult.results || [],
     });
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : "图片识别失败";
+    const errorMessage =
+      error instanceof Error ? error.message : "图片识别失败";
 
     return NextResponse.json({ error: errorMessage }, { status: 500 });
   }
