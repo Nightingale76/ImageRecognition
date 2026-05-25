@@ -1,6 +1,7 @@
 "use client";
 
 import Image from "next/image";
+import QRCode from "qrcode";
 import { useEffect, useRef, useState } from "react";
 
 interface RecognitionResult {
@@ -11,6 +12,8 @@ interface RecognitionResult {
 
 type ShareAction = "download" | "copy";
 
+const SHARE_URL = "https://image-recognition-xi.vercel.app";
+
 function loadImage(src: string) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
     const image = new window.Image();
@@ -18,6 +21,20 @@ function loadImage(src: string) {
     image.onerror = () => reject(new Error("分享图生成失败，请重新上传图片"));
     image.src = src;
   });
+}
+
+async function createQrCodeImage() {
+  const qrCodeDataUrl = await QRCode.toDataURL(SHARE_URL, {
+    errorCorrectionLevel: "M",
+    margin: 1,
+    scale: 8,
+    color: {
+      dark: "#111827",
+      light: "#ffffff",
+    },
+  });
+
+  return loadImage(qrCodeDataUrl);
 }
 
 function drawRoundedRect(
@@ -207,7 +224,10 @@ export default function Home() {
       throw new Error("当前浏览器不支持生成分享图");
     }
 
-    const sourceImage = await loadImage(imageBase64);
+    const [sourceImage, qrCodeImage] = await Promise.all([
+      loadImage(imageBase64),
+      createQrCodeImage(),
+    ]);
     const width = 1200;
     const height = 1800;
     const padding = 80;
@@ -298,9 +318,27 @@ export default function Home() {
       });
     }
 
+    const footerY = 1568;
+    const qrSize = 160;
+    const qrX = width - padding - qrSize;
+    const qrY = footerY - 26;
+
+    context.fillStyle = "#111827";
+    context.font = "700 30px Arial, 'Microsoft YaHei', sans-serif";
+    context.fillText("扫码体验图片识别工具", padding + 28, footerY + 20);
+
+    context.fillStyle = "#6b7280";
+    context.font = "400 25px Arial, 'Microsoft YaHei', sans-serif";
+    context.fillText(SHARE_URL.replace("https://", ""), padding + 28, footerY + 68);
+
     context.fillStyle = "#9ca3af";
-    context.font = "400 24px Arial, 'Microsoft YaHei', sans-serif";
-    context.fillText("image-recognition", padding, 1648);
+    context.font = "400 22px Arial, 'Microsoft YaHei', sans-serif";
+    context.fillText("image-recognition", padding + 28, footerY + 122);
+
+    context.fillStyle = "#ffffff";
+    drawRoundedRect(context, qrX - 12, qrY - 12, qrSize + 24, qrSize + 24, 24);
+    context.fill();
+    context.drawImage(qrCodeImage, qrX, qrY, qrSize, qrSize);
 
     return canvasToBlob(canvas);
   }
